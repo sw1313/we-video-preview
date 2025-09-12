@@ -1,0 +1,62 @@
+# ========== 播放器 ==========
+[players]
+mpv_candidates = [
+  "C:\\Program Files\\mpv\\mpv.exe",
+  "C:\\Program Files (x86)\\mpv\\mpv.exe",
+  "C:\\Users\\Public\\scoop\\apps\\mpv\\current\\mpv.exe",
+]
+ffplay_candidates = [
+  "C:\\Windows\\System32\\ffplay.exe",
+  "C:\\ffmpeg\\bin\\ffplay.exe",
+]
+
+[players.mpv]
+args_new = [
+  "--vo=sdl",
+  "--ontop",
+  "--keep-open=no",
+  "--osd-level=1",
+  "--no-terminal",
+  "--geometry=50%x50%",
+  "--autofit=80%",
+]
+args_old = [
+  "--vo=sdl",
+  "--ontop",
+  "--keep-open=no",
+  "--osd-level=1",
+  "--no-terminal",
+]
+
+[players.ffplay]
+args = ["-autoexit", "-hide_banner", "-loglevel", "error"]
+
+# ========== 模板匹配 / 截屏 ==========
+[match]
+template = "ocr.png"
+search_whole_screen = false
+search_box_w = 1000
+search_box_h = 1200
+scales = [1.00, 1.10, 0.90, 1.15, 0.85, 1.20, 0.95, 1.05, 1.30, 0.80]
+threshold = 0.80
+context_menu_delay = 0.15
+save_debug_image = false
+debug_dir = "debug"
+debounce_sec = 0.35
+
+# ========== 视频检索 ==========
+[video]
+exts = [".mp4", ".mkv", ".webm", ".mov", ".avi"]
+max_depth = 3
+
+# ========== PyAutoGUI ==========
+[pyautogui]
+failsafe = true
+pause = 0.02
+
+# ========== 热键 ==========
+[hotkeys]
+# 同时按下这些修饰键 + 指定鼠标键触发（大小写不敏感）
+trigger_mods = ["alt"]      # 可选: "ctrl","shift","alt","win"
+trigger_button = "left"     # 可选: "left","right","middle"
+exit = "ctrl+alt+q"         # 退出脚本的组合键
