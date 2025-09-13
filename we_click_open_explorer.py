@@ -492,21 +492,42 @@ def right_click_and_find():
         pag.click(mx, my, button="right")
         time.sleep(CONTEXT_MENU_DELAY)
 
-        if SEARCH_WHOLE_SCREEN:
-            sw, sh = pag.size()
-            shot, left, top = grab_region(0, 0, sw, sh)
-        else:
-            shot, left, top = grab_region(mx, my, SEARCH_BOX_W, SEARCH_BOX_H)
-
         tpl_gray = load_template_gray(TEMPLATE_PATH)
-        ok, cx, cy, score, scale, rect = match_template_multi(shot, tpl_gray, SCALES, THRESHOLD)
+
+        ok = False
+        cx = cy = -1
+        score = -1.0
+        scale = None
+        rect = None
+        shot = None
+        left = top = 0
+
+        # ====== 新增：最多截取并匹配 3 次（未命中则重试）======
+        MAX_TRIES = 3
+        for i in range(MAX_TRIES):
+            if SEARCH_WHOLE_SCREEN:
+                sw, sh = pag.size()
+                shot, left, top = grab_region(0, 0, sw, sh)
+            else:
+                shot, left, top = grab_region(mx, my, SEARCH_BOX_W, SEARCH_BOX_H)
+
+            ok, cx, cy, score, scale, rect = match_template_multi(shot, tpl_gray, SCALES, THRESHOLD)
+
+            if ok:
+                break  # 命中就退出重试循环
+            else:
+                # 记录每次 miss，标签带上重试序号
+                save_debug(shot, rect, score, scale, left, top, f"miss_try{i+1}")
+                print(f"[MISS] 未命中（第 {i+1} 次），best_score={score if not isinstance(score,float) else round(score,3)}  scale={scale}")
+                # 给菜单一个更稳定的时间片，再次尝试
+                time.sleep(0.06)
+
         if not ok:
-            save_debug(shot, rect, score, scale, left, top, "miss")
-            print(f"[MISS] 未命中，best_score={score if not isinstance(score,float) else round(score,3)}  scale={scale}")
-            # 识别失败 -> 立即释放锁
+            # 三次都没命中 -> 释放锁并返回
             unlock_mouse()
             return
 
+        # ====== 命中后走原来的流程 ======
         gx, gy = left + cx, top + cy
         save_debug(shot, rect, score, scale, left, top, "hit")
         pag.click(gx, gy, button="left")
