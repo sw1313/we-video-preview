@@ -485,6 +485,10 @@ def right_click_and_find():
         before_pids = _list_explorer_pids()
 
         mx, my = pag.position()
+
+        # === 在右键前锁住物理鼠标移动（不影响程序注入事件） ===
+        lock_mouse()
+
         pag.click(mx, my, button="right")
         time.sleep(CONTEXT_MENU_DELAY)
 
@@ -499,12 +503,17 @@ def right_click_and_find():
         if not ok:
             save_debug(shot, rect, score, scale, left, top, "miss")
             print(f"[MISS] 未命中，best_score={score if not isinstance(score,float) else round(score,3)}  scale={scale}")
+            # 识别失败 -> 立即释放锁
+            unlock_mouse()
             return
 
         gx, gy = left + cx, top + cy
         save_debug(shot, rect, score, scale, left, top, "hit")
         pag.click(gx, gy, button="left")
         print(f"[OK] 命中 @ ({gx},{gy})  score={score:.3f}  scale={scale:.2f}")
+
+        # 命中后已执行左键 -> 立即释放锁
+        unlock_mouse()
 
         hwnd, path = wait_new_explorer(before_hwnds, timeout_sec=6.0, poll=0.05)
         if not hwnd:
@@ -535,6 +544,13 @@ def right_click_and_find():
 
     except Exception as e:
         print("[ERROR]", e)
+    finally:
+        # 兜底：如果还处于锁定，则释放，防止异常导致一直锁住
+        if 'mouse_lock_active' in globals() and mouse_lock_active:
+            try:
+                unlock_mouse()
+            except Exception:
+                pass
 
 # ---------- 仅在按住修饰键时装鼠标钩子 ----------
 import ctypes
@@ -542,6 +558,7 @@ from ctypes import wintypes
 user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
 
 WH_MOUSE_LL = 14
+WM_MOUSEMOVE = 0x0200  # 新增：用于拦截物理移动
 WM_LBUTTONDOWN, WM_LBUTTONUP = 0x0201, 0x0202
 WM_RBUTTONDOWN, WM_RBUTTONUP = 0x0204, 0x0205
 WM_MBUTTONDOWN, WM_MBUTTONUP = 0x0207, 0x0208
@@ -590,6 +607,9 @@ STOP_HOOK = threading.Event()
 hotkey_used_this_hold = False
 swallow_pair_active = False
 
+# 新增：物理鼠标移动锁标志
+mouse_lock_active = False
+
 def _mods_pressed_win():
     for m in TRIGGER_MODS:
         m = m.lower()
@@ -607,17 +627,34 @@ def _mods_pressed_win():
 def _button_pair_for_trigger():
     return BUTTON_WM.get(TRIGGER_BUTTON, BUTTON_WM["left"])
 
+def lock_mouse():
+    """开启物理鼠标移动锁，并确保钩子运行。"""
+    global mouse_lock_active
+    mouse_lock_active = True
+    _ensure_hook_started()
+
+def unlock_mouse():
+    """关闭物理鼠标移动锁；若未按修饰键则顺便卸钩。"""
+    global mouse_lock_active
+    mouse_lock_active = False
+    if not _mods_pressed_win():
+        _ensure_hook_stopped()
+
 @LowLevelMouseProc
 def _mouse_proc(nCode, wParam, lParam):
-    global hotkey_used_this_hold, swallow_pair_active, _last_trigger
+    global hotkey_used_this_hold, swallow_pair_active, _last_trigger, mouse_lock_active
     if nCode != 0:
         return user32.CallNextHookEx(HOOK_HANDLE, nCode, wParam, lParam)
 
     hs = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
 
-    # 忽略注入事件（避免我们模拟的点击被钩子吞掉）
+    # 忽略注入事件（避免我们模拟的移动/点击被钩子吞掉）
     if hs.flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED):
         return user32.CallNextHookEx(HOOK_HANDLE, nCode, wParam, lParam)
+
+    # 若处于锁定，吞掉物理鼠标移动（不影响程序注入的移动）
+    if mouse_lock_active and wParam == WM_MOUSEMOVE:
+        return 1
 
     downs, ups = _button_pair_for_trigger()
 
@@ -662,7 +699,7 @@ def _hook_loop():
     HOOK_THREAD_ID = None
 
 def _ensure_hook_started():
-    """按下修饰键时调用：若未装钩子则装，重置本次按住的状态。"""
+    """按下修饰键时调用：若未装钩子则装，重置本次按住的状态。也可供锁定时强制启用钩子。"""
     global HOOK_THREAD, hotkey_used_this_hold, swallow_pair_active
     if HOOK_THREAD and HOOK_THREAD.is_alive():
         return
@@ -701,7 +738,9 @@ def _on_key_event(e):
             if all(keyboard.is_pressed(_norm_mod(m)) for m in TRIGGER_MODS):
                 _ensure_hook_started()
         elif e.event_type == "up":
-            _ensure_hook_stopped()
+            # 锁住期间不要卸钩；释放锁时会判断是否卸钩
+            if not mouse_lock_active:
+                _ensure_hook_stopped()
     except Exception:
         pass
 
