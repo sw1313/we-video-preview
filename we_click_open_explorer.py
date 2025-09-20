@@ -502,11 +502,12 @@ def right_click_and_find():
         shot = None
         left = top = 0
 
-        # ====== 修改点：每轮先右下(BR)后右上(TR)，共循环3轮；不再尝试左侧或全屏 ======
+        # ====== 修改点：每轮先右下(BR)后右中(RM)，共循环3轮；不再尝试右上/左侧/全屏 ======
         MAX_TRIES = 3
+        half_h = SEARCH_BOX_H // 2
         regions = [
-            ("br", mx,               my,                SEARCH_BOX_W, SEARCH_BOX_H),   # 右下
-            ("tr", mx,               my - SEARCH_BOX_H, SEARCH_BOX_W, SEARCH_BOX_H),  # 右上
+            ("br", mx,               my,                 SEARCH_BOX_W, SEARCH_BOX_H),   # 右下
+            ("rm", mx,               my - half_h,        SEARCH_BOX_W, SEARCH_BOX_H),   # 右中（以鼠标为纵向中心）
         ]
 
         for i in range(MAX_TRIES):
@@ -523,7 +524,7 @@ def right_click_and_find():
                 break
 
         if not ok:
-            # 三轮（BR→TR）都未命中 -> 释放锁并返回
+            # 三轮（BR→RM）都未命中 -> 释放锁并返回
             unlock_mouse()
             return
 
