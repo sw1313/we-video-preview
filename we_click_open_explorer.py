@@ -502,28 +502,28 @@ def right_click_and_find():
         shot = None
         left = top = 0
 
-        # ====== 新增：最多截取并匹配 3 次（未命中则重试）======
+        # ====== 修改点：每轮先右下(BR)后右上(TR)，共循环3轮；不再尝试左侧或全屏 ======
         MAX_TRIES = 3
+        regions = [
+            ("br", mx,               my,                SEARCH_BOX_W, SEARCH_BOX_H),   # 右下
+            ("tr", mx,               my - SEARCH_BOX_H, SEARCH_BOX_W, SEARCH_BOX_H),  # 右上
+        ]
+
         for i in range(MAX_TRIES):
-            if SEARCH_WHOLE_SCREEN:
-                sw, sh = pag.size()
-                shot, left, top = grab_region(0, 0, sw, sh)
-            else:
-                shot, left, top = grab_region(mx, my, SEARCH_BOX_W, SEARCH_BOX_H)
-
-            ok, cx, cy, score, scale, rect = match_template_multi(shot, tpl_gray, SCALES, THRESHOLD)
-
+            for tag, l, t, w, h in regions:
+                shot, left, top = grab_region(l, t, w, h)
+                ok, cx, cy, score, scale, rect = match_template_multi(shot, tpl_gray, SCALES, THRESHOLD)
+                if ok:
+                    save_debug(shot, rect, score, scale, left, top, f"hit_{tag}_loop{i+1}")
+                    break
+                else:
+                    save_debug(shot, rect, score, scale, left, top, f"miss_{tag}_loop{i+1}")
+                    time.sleep(0.06)  # 菜单稳定时间片
             if ok:
-                break  # 命中就退出重试循环
-            else:
-                # 记录每次 miss，标签带上重试序号
-                save_debug(shot, rect, score, scale, left, top, f"miss_try{i+1}")
-                print(f"[MISS] 未命中（第 {i+1} 次），best_score={score if not isinstance(score,float) else round(score,3)}  scale={scale}")
-                # 给菜单一个更稳定的时间片，再次尝试
-                time.sleep(0.06)
+                break
 
         if not ok:
-            # 三次都没命中 -> 释放锁并返回
+            # 三轮（BR→TR）都未命中 -> 释放锁并返回
             unlock_mouse()
             return
 
