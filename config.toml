@@ -33,12 +33,13 @@ args = ["-autoexit", "-hide_banner", "-loglevel", "error"]
 
 # ========== 模板匹配 / 截屏 ==========
 [match]
-template = "ocr.png"
+anchor_horizontal = "right"
+templates = ["ocr1.png", "ocr2.png"]
 search_whole_screen = false
-search_box_w = 1000
-search_box_h = 1200
+search_box_w = 500
+search_box_h = 1400
 scales = [1.00, 1.10, 0.90, 1.15, 0.85, 1.20, 0.95, 1.05, 1.30, 0.80]
-threshold = 0.80
+threshold = 0.90
 context_menu_delay = 0.15
 save_debug_image = false
 debug_dir = "debug"

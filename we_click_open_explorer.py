@@ -1,16 +1,48 @@
-﻿# we_click_open_explorer.py
-import os, time, threading, subprocess, json, copy
+﻿# -*- coding: utf-8 -*-
+# we_click_open_explorer.py
+
+import os, time, threading, subprocess, json, copy, glob
 from datetime import datetime
 from pathlib import Path
 
+# ========= 在导入 GUI / 截图 / 自动化 库之前启用 DPI 感知（关键） =========
+import ctypes
+from ctypes import wintypes
+
+def _enable_dpi_awareness():
+    try:
+        user32 = ctypes.windll.user32
+        # 优先：Per-monitor v2（Windows 10+ 推荐）
+        if hasattr(user32, "SetProcessDpiAwarenessContext"):
+            try:
+                user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))  # PER_MONITOR_AWARE_V2
+                return
+            except Exception:
+                pass
+        # 备用：SetProcessDpiAwareness（Windows 8.1+）
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_AWARE
+            return
+        except Exception:
+            pass
+        # 兼容：旧 API
+        try:
+            user32.SetProcessDPIAware()
+            return
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+_enable_dpi_awareness()
+
+# ====== 现在安全地导入依赖（这些库会基于上面设置按物理像素工作） ======
 import cv2, mss, numpy as np
 import pyautogui as pag
 from PIL import Image
+import keyboard  # 仅用于退出热键
 
-import keyboard, mouse
-from mouse import ButtonEvent
-
-# -------- 可选依赖：psutil（用于更可靠的进程差集清理） --------
+# -------- 可选依赖：psutil --------
 try:
     import psutil
 except Exception:
@@ -27,29 +59,20 @@ DEFAULTS = {
         "ffplay_candidates": [r"C:\Windows\System32\ffplay.exe", r"C:\ffmpeg\bin\ffplay.exe"],
         "mpv": {
             "args_new": [
-                "--vo=gpu-next",
-                "--tone-mapping=clip",
-                "--target-peak=500",
-                "--ontop",
-                "--keep-open=no",
-                "--osd-level=1",
-                "--no-terminal",
+                "--vo=gpu-next", "--tone-mapping=clip", "--target-peak=500",
+                "--ontop", "--keep-open=no", "--osd-level=1", "--no-terminal",
             ],
             "args_old": [
-                "--vo=gpu",
-                "--tone-mapping=clip",
-                "--target-peak=500",
-                "--ontop",
-                "--keep-open=no",
-                "--osd-level=1",
-                "--no-terminal",
+                "--vo=gpu", "--tone-mapping=clip", "--target-peak=500",
+                "--ontop", "--keep-open=no", "--osd-level=1", "--no-terminal",
             ],
         },
         "ffplay": {"args": ["-autoexit", "-hide_banner", "-loglevel", "error"]},
     },
     "match": {
         "template": "ocr.png",
-        "search_whole_screen": False,
+        "templates": [],
+        "template_globs": [],
         "search_box_w": 1000,
         "search_box_h": 1200,
         "scales": [1.00, 1.10, 0.90, 1.15, 0.85, 1.20, 0.95, 1.05, 1.30, 0.80],
@@ -110,34 +133,7 @@ def _resolve_path(p):
     pp = Path(p)
     return str(pp if pp.is_absolute() else (BASE_DIR / pp))
 
-MPV_CANDIDATES = [_resolve_path(p) for p in CFG["players"]["mpv_candidates"]]
-FFPLAY_CANDIDATES = [_resolve_path(p) for p in CFG["players"]["ffplay_candidates"]]
-
-TEMPLATE_PATH = _resolve_path(CFG["match"]["template"])
-SEARCH_WHOLE_SCREEN = bool(CFG["match"]["search_whole_screen"])
-SEARCH_BOX_W = int(CFG["match"]["search_box_w"])
-SEARCH_BOX_H = int(CFG["match"]["search_box_h"])
-SCALES = [float(x) for x in CFG["match"]["scales"]]
-THRESHOLD = float(CFG["match"]["threshold"])
-CONTEXT_MENU_DELAY = float(CFG["match"]["context_menu_delay"])
-SAVE_DEBUG_IMAGE = bool(CFG["match"]["save_debug_image"])
-DEBUG_DIR = _resolve_path(CFG["match"]["debug_dir"])
-DEBOUNCE_SEC = float(CFG["match"]["debounce_sec"])
-
-VIDEO_EXTS = [str(x).lower() for x in CFG["video"]["exts"]]
-MAX_DEPTH = int(CFG["video"]["max_depth"])
-
-FFPLAY_ARGS = [str(x) for x in CFG["players"]["ffplay"]["args"]]
-MPV_ARGS_NEW = [str(x) for x in CFG["players"]["mpv"]["args_new"]]
-MPV_ARGS_OLD = [str(x) for x in CFG["players"]["mpv"]["args_old"]]
-
-TRIGGER_MODS = [s.lower() for s in CFG["hotkeys"]["trigger_mods"]]
-TRIGGER_BUTTON = str(CFG["hotkeys"]["trigger_button"]).lower()
-EXIT_HOTKEY = str(CFG["hotkeys"]["exit"])
-
-pag.FAILSAFE = bool(CFG["pyautogui"]["failsafe"])
-pag.PAUSE = float(CFG["pyautogui"]["pause"])
-
+# ---------- 播放器 ----------
 def find_exe(candidates):
     for p in candidates:
         if os.path.exists(p):
@@ -145,8 +141,14 @@ def find_exe(candidates):
     from shutil import which
     return which(os.path.basename(candidates[0])) or None
 
+MPV_CANDIDATES = [_resolve_path(p) for p in CFG["players"]["mpv_candidates"]]
+FFPLAY_CANDIDATES = [_resolve_path(p) for p in CFG["players"]["ffplay_candidates"]]
 PLAYER_MPV = find_exe(MPV_CANDIDATES)
 PLAYER_FFPLAY = find_exe(FFPLAY_CANDIDATES)
+
+FFPLAY_ARGS = [str(x) for x in CFG["players"]["ffplay"]["args"]]
+MPV_ARGS_NEW = [str(x) for x in CFG["players"]["mpv"]["args_new"]]
+MPV_ARGS_OLD = [str(x) for x in CFG["players"]["mpv"]["args_old"]]
 
 def _try_spawn(cmd):
     try:
@@ -179,7 +181,6 @@ def play_video(path):
 import win32com.client, win32gui, win32con, win32process
 
 def _com_shell():
-    """带 CoInitialize 的 Shell.Application 获取器，确保释放。"""
     try:
         import pythoncom
         pythoncom.CoInitialize()
@@ -248,8 +249,6 @@ def _count_visible_windows_of_pid(pid: int) -> int:
     return cnt
 
 def _terminate_process(pid: int):
-    import ctypes
-    from ctypes import wintypes
     PROCESS_TERMINATE = 0x0001
     k = ctypes.windll.kernel32
     k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
@@ -262,8 +261,6 @@ def _terminate_process(pid: int):
             k.CloseHandle(h)
 
 def _send_close(hwnd):
-    import ctypes
-    from ctypes import wintypes
     user32 = ctypes.windll.user32
     SMTO_ABORTIFHUNG = 0x0002
     user32.SendMessageTimeoutW.restype = wintypes.LPARAM
@@ -273,12 +270,11 @@ def _send_close(hwnd):
     ]
     tmp = wintypes.DWORD(0)
     user32.SendMessageTimeoutW(hwnd, win32con.WM_SYSCOMMAND, win32con.SC_CLOSE, 0,
-                               SMTO_ABORTIFHUNG, 1000, ctypes.byref(tmp))
+                              SMTO_ABORTIFHUNG, 1000, ctypes.byref(tmp))
     user32.SendMessageTimeoutW(hwnd, win32con.WM_CLOSE, 0, 0,
-                               SMTO_ABORTIFHUNG, 1000, ctypes.byref(tmp))
+                              SMTO_ABORTIFHUNG, 1000, ctypes.byref(tmp))
 
 def close_explorer_by_hwnd(hwnd, timeout_sec=3.0):
-    """定向关闭这个窗口（COM Quit -> 消息），避免任务栏残留"""
     shell, pcm = _com_shell()
     try:
         target = None
@@ -321,7 +317,6 @@ def _list_explorer_pids():
                 pass
         return out
     else:
-        # 无 psutil 时，退化：用 HWND 列表推断 PID
         pids = set()
         for hwnd in get_explorer_hwnds().keys():
             pid = _get_pid(hwnd)
@@ -330,11 +325,6 @@ def _list_explorer_pids():
         return pids
 
 def cleanup_new_explorer_processes(before_pids: set, hwnd_hint: int = None):
-    """
-    识别触发后新增的 explorer.exe 进程并清理：
-    1) 关闭其所有可见窗口（COM.Quit/WM_CLOSE）
-    2) 若仍存活，且不是壳进程，且无可见顶层窗口 -> 安全终止
-    """
     after = _list_explorer_pids()
     new_pids = sorted(list(after - before_pids))
     if not new_pids and hwnd_hint:
@@ -379,9 +369,6 @@ def cleanup_new_explorer_processes(before_pids: set, hwnd_hint: int = None):
 def close_and_cleanup_explorer_async(before_pids: set, hwnd: int,
                                      close_timeout_sec: float = 0.5,
                                      final_wait_sec: float = 0.15):
-    """
-    异步：尽快发起关闭 Explorer 的动作并做差集清理，但不阻塞主流程。
-    """
     def _job():
         try:
             try:
@@ -394,10 +381,28 @@ def close_and_cleanup_explorer_async(before_pids: set, hwnd: int,
                 time.sleep(final_wait_sec)
         except Exception:
             pass
-
     threading.Thread(target=_job, daemon=True, name="ExplorerCleanup").start()
 
 # ---------- 文件 / 图像 ----------
+VIDEO_EXTS = [str(x).lower() for x in CFG["video"]["exts"]]
+MAX_DEPTH = int(CFG["video"]["max_depth"])
+
+SEARCH_BOX_W = int(CFG["match"]["search_box_w"])
+SEARCH_BOX_H = int(CFG["match"]["search_box_h"])
+SCALES = [float(x) for x in CFG["match"]["scales"]]
+THRESHOLD = float(CFG["match"]["threshold"])
+CONTEXT_MENU_DELAY = float(CFG["match"]["context_menu_delay"])
+SAVE_DEBUG_IMAGE = bool(CFG["match"]["save_debug_image"])
+DEBUG_DIR = _resolve_path(CFG["match"]["debug_dir"])
+DEBOUNCE_SEC = float(CFG["match"]["debounce_sec"])
+
+TRIGGER_MODS = [s.lower() for s in CFG["hotkeys"]["trigger_mods"]]
+TRIGGER_BUTTON = str(CFG["hotkeys"]["trigger_button"]).lower()
+EXIT_HOTKEY = str(CFG["hotkeys"]["exit"])
+
+pag.FAILSAFE = bool(CFG["pyautogui"]["failsafe"])
+pag.PAUSE = float(CFG["pyautogui"]["pause"])
+
 def find_video(root: str, exts=VIDEO_EXTS, max_depth=0):
     root_p = Path(root)
     if not root_p.exists():
@@ -415,30 +420,315 @@ def find_video(root: str, exts=VIDEO_EXTS, max_depth=0):
                     return hit
     return None
 
-def grab_region(left, top, width, height):
+# ========= 多模板 =========
+def _collect_template_paths():
+    paths = []
+    for p in (CFG["match"].get("templates") or []):
+        pp = _resolve_path(p)
+        if os.path.exists(pp):
+            paths.append(pp)
+    for pat in (CFG["match"].get("template_globs") or []):
+        if os.path.isabs(pat):
+            paths.extend([f for f in glob.glob(pat) if os.path.isfile(f)])
+        else:
+            if any(c in pat for c in "*?[]"):
+                paths.extend([str(p) for p in BASE_DIR.glob(pat) if p.is_file()])
+            else:
+                p0 = BASE_DIR / pat
+                if p0.is_file():
+                    paths.append(str(p0))
+    if not paths:
+        p0 = _resolve_path(CFG["match"].get("template", "ocr.png"))
+        if os.path.exists(p0):
+            paths = [p0]
+    uniq, seen = [], set()
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    return uniq
+
+TEMPLATES = []
+
+def _load_all_templates():
+    global TEMPLATES
+    TEMPLATES = []
+    paths = _collect_template_paths()
+    for p in paths:
+        tpl = cv2.imread(p, cv2.IMREAD_COLOR)
+        if tpl is None:
+            print(f"[WARN] 模板无法读取：{p}")
+            continue
+        gray = cv2.cvtColor(tpl, cv2.COLOR_BGR2GRAY)
+        TEMPLATES.append({"name": os.path.basename(p), "path": p, "gray": gray})
+    print(f"[TEMPLATE] 已加载模板 {len(TEMPLATES)} 个。")
+    if not TEMPLATES:
+        print("[ERROR] 未找到任何可用模板。")
+
+# ========= 物理坐标 & 输入注入 =========
+user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
+
+# mouse_event（右键原地注入）
+MOUSEEVENTF_LEFTDOWN  = 0x0002
+MOUSEEVENTF_LEFTUP    = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP   = 0x0010
+
+# SendInput 常量
+INPUT_MOUSE = 0
+MOUSEEVENTF_MOVE      = 0x0001
+MOUSEEVENTF_ABSOLUTE  = 0x8000
+MOUSEEVENTF_VIRTUALDESK = 0x4000
+
+# SendInput 结构
+if ctypes.sizeof(ctypes.c_void_p) == 8:
+    ULONG_PTR = ctypes.c_ulonglong
+else:
+    ULONG_PTR = ctypes.c_ulong
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx",          wintypes.LONG),
+        ("dy",          wintypes.LONG),
+        ("mouseData",   wintypes.DWORD),
+        ("dwFlags",     wintypes.DWORD),
+        ("time",        wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
+    ]
+
+class INPUT_UNION(ctypes.Union):
+    _fields_ = [("mi", MOUSEINPUT)]
+
+class INPUT(ctypes.Structure):
+    _fields_ = [
+        ("type",  wintypes.DWORD),
+        ("union", INPUT_UNION),
+    ]
+
+SendInput = user32.SendInput
+SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
+SendInput.restype  = wintypes.UINT
+
+
+def _norm_abs_from_physical(px, py):
+    """
+    【FIX】把物理像素 (px,py) 映射到 SendInput 绝对坐标（0..65535）。
+    为确保与 SendInput 行为完全一致，归一化严格基于 WinAPI GetSystemMetrics
+    获取的虚拟桌面物理像素边界。这解决了多屏/不同DPI下的点击偏移问题。
+    """
+    SM_XVIRTUALSCREEN = 76
+    SM_YVIRTUALSCREEN = 77
+    SM_CXVIRTUALSCREEN = 78
+    SM_CYVIRTUALSCREEN = 79
+    vx = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+    vy = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+    vw = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+    vh = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+    
+    vw = max(vw, 1)
+    vh = max(vh, 1)
+
+    # 映射到 0..65535 范围。注意 vw-1, vh-1 是因为像素坐标从 0 开始。
+    nx = int(round((px - vx) * 65535 / (vw - 1))) if vw > 1 else 0
+    ny = int(round((py - vy) * 65535 / (vh - 1))) if vh > 1 else 0
+    
+    # 裁剪到合法范围
+    nx = max(0, min(65535, nx))
+    ny = max(0, min(65535, ny))
+    return nx, ny
+
+def _sendinput_move_abs(px, py):
+    nx, ny = _norm_abs_from_physical(px, py)
+    inp = INPUT()
+    inp.type = INPUT_MOUSE
+    inp.union.mi = MOUSEINPUT(nx, ny, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, 0, 0)
+    return SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp)) == 1
+
+def _sendinput_left_down():
+    inp = INPUT()
+    inp.type = INPUT_MOUSE
+    inp.union.mi = MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, 0)
+    return SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp)) == 1
+
+def _sendinput_left_up():
+    inp = INPUT()
+    inp.type = INPUT_MOUSE
+    inp.union.mi = MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, 0)
+    return SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp)) == 1
+
+def _click_left_at_physical(px, py):
+    """基于物理像素（可为负）在虚拟桌面上绝对定位并左键单击。
+
+    优先方案（修复副屏偏移问题）：
+      - 若系统支持 SetPhysicalCursorPos，则直接设置物理光标位置，再用 mouse_event 注入按键。
+      - 若不支持，则回退到原来的 SendInput 映射方式。
+      - 再次兜底：尝试 SetCursorPos / pyautogui。
+    """
+    try:
+        px = int(round(px)); py = int(round(py))
+    except Exception:
+        px = int(px); py = int(py)
+
+    # 优先：SetPhysicalCursorPos（在多显示器 + 不同缩放场景下通常能避免偏移）
+    try:
+        if hasattr(user32, "SetPhysicalCursorPos"):
+            try:
+                user32.SetPhysicalCursorPos(px, py)
+            except Exception:
+                # 某些平台返回值或调用会抛异常，继续走后续方案
+                pass
+            # 即便返回值为0，也尝试等待并注入事件
+            time.sleep(0.03)
+            try:
+                user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                user32.mouse_event(MOUSEEVENTF_LEFTUP,   0, 0, 0, 0)
+                return
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 备选：SendInput 绝对映射（保留原有映射逻辑）
+    try:
+        ok = _sendinput_move_abs(px, py)
+        if ok:
+            time.sleep(0.03)  # 稍等以确保系统完成坐标更新/菜单渲染
+            _sendinput_left_down()
+            _sendinput_left_up()
+            return
+    except Exception:
+        pass
+
+    # 兜底：SetCursorPos + mouse_event / pyautogui
+    try:
+        if hasattr(user32, "SetCursorPos"):
+            user32.SetCursorPos(int(px), int(py))
+            time.sleep(0.02)
+            user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            user32.mouse_event(MOUSEEVENTF_LEFTUP,   0, 0, 0, 0)
+            return
+    except Exception:
+        pass
+    try:
+        pag.moveTo(int(px), int(py), duration=0)
+        pag.click(button="left")
+    except Exception:
+        pass
+
+def _send_right_click_no_move():
+    """不移动鼠标，当前位置注入右键（支持多屏/DPI，避免偏移）。"""
+    try:
+        # 先获取物理光标位置（最可靠）
+        x, y = _get_cursor_pos_physical()
+    except Exception:
+        x, y = 0, 0
+    try:
+        if hasattr(user32, "SetPhysicalCursorPos"):
+            try:
+                user32.SetPhysicalCursorPos(int(x), int(y))
+            except Exception:
+                pass
+            time.sleep(0.01)
+            try:
+                user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+                user32.mouse_event(MOUSEEVENTF_RIGHTUP,   0, 0, 0, 0)
+                return
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 备选：SendInput 绝对注入右键（使用虚拟桌面归一化）
+    try:
+        nx, ny = _norm_abs_from_physical(x, y)
+        inp = INPUT()
+        inp.type = INPUT_MOUSE
+        inp.union.mi = MOUSEINPUT(nx, ny, 0,
+            MOUSEEVENTF_RIGHTDOWN | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, 0, 0)
+        SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+        inp.union.mi = MOUSEINPUT(nx, ny, 0,
+            MOUSEEVENTF_RIGHTUP | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, 0, 0)
+        SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+        return
+    except Exception:
+        pass
+
+    # 最后兜底：pyautogui
+    try:
+        pag.click(button="right")
+    except Exception:
+        pass
+
+def _get_cursor_pos_physical():
+    pt = wintypes.POINT()
+    try:
+        if hasattr(user32, "GetPhysicalCursorPos"):
+            if user32.GetPhysicalCursorPos(ctypes.byref(pt)):
+                return int(pt.x), int(pt.y)
+    except Exception:
+        pass
+    try:
+        if user32.GetCursorPos(ctypes.byref(pt)):
+            return int(pt.x), int(pt.y)
+    except Exception:
+        pass
+    try:
+        p = pag.position()
+        return int(p.x), int(p.y)
+    except Exception:
+        return 0, 0
+
+def _get_monitor_bounds_for_point(mx, my):
+    """【FIX】获取指定物理坐标点所在的显示器物理边界，逻辑更稳健。"""
     with mss.mss() as sct:
-        mon = sct.monitors[0]
-        l = max(0, int(left))
-        t = max(0, int(top))
-        r = min(mon["width"], int(left + width))
-        b = min(mon["height"], int(top + height))
-        w = max(1, r - l)
-        h = max(1, b - t)
-        raw = sct.grab({"left": l, "top": t, "width": w, "height": h})
-        img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
-        return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR), l, t
+        # sct.monitors[0] is the full virtual screen union.
+        # sct.monitors[1:] are the individual physical monitors.
+        for mon in sct.monitors[1:]:
+            left, top = int(mon["left"]), int(mon["top"])
+            right = left + int(mon["width"])
+            bottom = top + int(mon["height"])
+            if left <= mx < right and top <= my < bottom:
+                return left, top, right, bottom
+        
+        # Fallback to primary monitor if not found in any (shouldn't happen with valid coords)
+        # sct.monitors[1] is the primary monitor in a multi-monitor setup
+        if len(sct.monitors) > 1:
+            mon = sct.monitors[1]
+        else: # Single monitor setup
+            mon = sct.monitors[0]
+            
+        left = int(mon["left"]); top = int(mon["top"])
+        right = left + int(mon["width"]); bottom = top + int(mon["height"])
+        return left, top, right, bottom
 
-def load_template_gray(path):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"模板不存在：{path}")
-    tpl = cv2.imread(path, cv2.IMREAD_COLOR)
-    if tpl is None:
-        raise RuntimeError(f"无法读取模板图像：{path}")
-    return cv2.cvtColor(tpl, cv2.COLOR_BGR2GRAY)
+# ========= 抓图（基于鼠标所在监视器边界） =========
+def grab_region_right_of(mx, my, w, h, vertical_mode="down"):
+    vx, vy, vr, vb = _get_monitor_bounds_for_point(mx, my)
 
-def match_template_multi(image_bgr, tpl_gray, scales, threshold):
-    img_gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    h_img, w_img = img_gray.shape[:2]
+    l = mx
+    r_req = mx + w
+    r = min(r_req, vr)
+    l = max(l, vx)
+
+    if vertical_mode == "center":
+        t = my - (h // 2)
+    else:
+        t = my
+    b_req = t + h
+    t = max(t, vy)
+    b = min(b_req, vb)
+
+    W = max(1, r - l)
+    H = max(1, b - t)
+
+    with mss.mss() as sct:
+        raw = sct.grab({"left": int(l), "top": int(t), "width": int(W), "height": int(H)})
+    img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+    return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR), int(l), int(t)
+
+def match_one_template(image_gray, tpl_gray, scales):
+    h_img, w_img = image_gray.shape[:2]
     best_val, best_center, best_rect, best_scale = -1.0, None, None, None
     th0, tw0 = tpl_gray.shape[:2]
     for s in scales:
@@ -447,18 +737,29 @@ def match_template_multi(image_bgr, tpl_gray, scales, threshold):
         if new_w > w_img or new_h > h_img:
             continue
         tpl_s = cv2.resize(tpl_gray, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        res = cv2.matchTemplate(img_gray, tpl_s, cv2.TM_CCOEFF_NORMED)
+        res = cv2.matchTemplate(image_gray, tpl_s, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(res)
         if max_val > best_val:
-            best_val = max_val
             x1, y1 = max_loc
             x2, y2 = x1 + new_w, y1 + new_h
+            best_val = max_val
             best_center = (x1 + new_w // 2, y1 + new_h // 2)
             best_rect = ((x1, y1), (x2, y2))
             best_scale = s
-    if best_val >= threshold and best_center is not None:
-        return True, best_center[0], best_center[1], best_val, best_scale, best_rect
-    return False, -1, -1, best_val, best_scale, best_rect
+    return best_val, best_center, best_rect, best_scale
+
+def match_best_template(image_bgr, templates, scales, threshold):
+    img_gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    best = {"ok": False, "name": None, "cx": -1, "cy": -1, "score": -1.0, "scale": None, "rect": None}
+    for t in templates:
+        val, cen, rect, sca = match_one_template(img_gray, t["gray"], scales)
+        if val > best["score"]:
+            best.update({
+                "ok": val >= threshold and cen is not None,
+                "name": t["name"], "cx": cen[0] if cen else -1, "cy": cen[1] if cen else -1,
+                "score": val, "scale": sca, "rect": rect,
+            })
+    return best
 
 def save_debug(image_bgr, rect, score, scale, left, top, label="hit"):
     if not SAVE_DEBUG_IMAGE:
@@ -475,72 +776,76 @@ def save_debug(image_bgr, rect, score, scale, left, top, label="hit"):
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     cv2.imwrite(os.path.join(DEBUG_DIR, f"{label}_{ts}_{left}x{top}.png"), img)
 
-# ---------- 主动作：右键→截屏→命中→Explorer→异步关闭/清理 → 播放 ----------
+# ---------- 主动作（只做右下/右中） ----------
 _trigger_lock = threading.Lock()
 _last_trigger = 0.0
 
-def right_click_and_find():
+def right_click_and_find(at_point=None):
     try:
+        if not TEMPLATES:
+            _load_all_templates()
+            if not TEMPLATES:
+                return
+
         before_hwnds = get_explorer_hwnds()
         before_pids = _list_explorer_pids()
 
-        mx, my = pag.position()
+        if at_point is not None and isinstance(at_point, tuple):
+            mx, my = int(at_point[0]), int(at_point[1])
+        else:
+            mx, my = _get_cursor_pos_physical()
 
-        # === 在右键前锁住物理鼠标移动（不影响程序注入事件） ===
-        lock_mouse()
+        print(f"[TRIGGER] Alt+{TRIGGER_BUTTON} @ ({mx},{my}) → 右键并匹配…")
 
-        pag.click(mx, my, button="right")
+        # 右键原地注入
+        _send_right_click_no_move()
         time.sleep(CONTEXT_MENU_DELAY)
 
-        tpl_gray = load_template_gray(TEMPLATE_PATH)
-
         ok = False
-        cx = cy = -1
-        score = -1.0
-        scale = None
-        rect = None
+        best = None
         shot = None
         left = top = 0
 
-        # ====== 修改点：每轮先右下(BR)后右中(RM)，共循环3轮；不再尝试右上/左侧/全屏 ======
         MAX_TRIES = 3
-        half_h = SEARCH_BOX_H // 2
-        regions = [
-            ("br", mx,               my,                 SEARCH_BOX_W, SEARCH_BOX_H),   # 右下
-            ("rm", mx,               my - half_h,        SEARCH_BOX_W, SEARCH_BOX_H),   # 右中（以鼠标为纵向中心）
-        ]
-
         for i in range(MAX_TRIES):
-            for tag, l, t, w, h in regions:
-                shot, left, top = grab_region(l, t, w, h)
-                ok, cx, cy, score, scale, rect = match_template_multi(shot, tpl_gray, SCALES, THRESHOLD)
-                if ok:
-                    save_debug(shot, rect, score, scale, left, top, f"hit_{tag}_loop{i+1}")
-                    break
-                else:
-                    save_debug(shot, rect, score, scale, left, top, f"miss_{tag}_loop{i+1}")
-                    time.sleep(0.06)  # 菜单稳定时间片
-            if ok:
+            # 右下
+            shot, left, top = grab_region_right_of(mx, my, SEARCH_BOX_W, SEARCH_BOX_H, vertical_mode="down")
+            res = match_best_template(shot, TEMPLATES, SCALES, THRESHOLD)
+            if res["ok"]:
+                save_debug(shot, res["rect"], res["score"], res["scale"], left, top, f"hit_{res['name']}_loop{i+1}_br")
+                best = res
+                ok = True
                 break
+            else:
+                save_debug(shot, res["rect"], res["score"], res["scale"], left, top, f"miss_loop{i+1}_br")
+                time.sleep(0.06)
+
+            # 右中
+            shot, left, top = grab_region_right_of(mx, my, SEARCH_BOX_W, SEARCH_BOX_H, vertical_mode="center")
+            res = match_best_template(shot, TEMPLATES, SCALES, THRESHOLD)
+            if res["ok"]:
+                save_debug(shot, res["rect"], res["score"], res["scale"], left, top, f"hit_{res['name']}_loop{i+1}_rm")
+                best = res
+                ok = True
+                break
+            else:
+                save_debug(shot, res["rect"], res["score"], res["scale"], left, top, f"miss_loop{i+1}_rm")
+                time.sleep(0.06)
 
         if not ok:
-            # 三轮（BR→RM）都未命中 -> 释放锁并返回
-            unlock_mouse()
+            print("[INFO] 未匹配到任何模板。")
             return
 
-        # ====== 命中后走原来的流程 ======
-        gx, gy = left + cx, top + cy
-        save_debug(shot, rect, score, scale, left, top, "hit")
-        pag.click(gx, gy, button="left")
-        print(f"[OK] 命中 @ ({gx},{gy})  score={score:.3f}  scale={scale:.2f}")
+        gx, gy = left + best["cx"], top + best["cy"]
+        save_debug(shot, best["rect"], best["score"], best["scale"], left, top, "hit_final")
 
-        # 命中后已执行左键 -> 立即释放锁
-        unlock_mouse()
+        # 左键：SendInput 绝对坐标（WinAPI 虚拟桌面物理像素归一化）
+        _click_left_at_physical(gx, gy)
+        print(f"[OK] 命中 [{best['name']}] @ ({gx},{gy}) score={best['score']:.3f} scale={best['scale']:.2f}")
 
         hwnd, path = wait_new_explorer(before_hwnds, timeout_sec=6.0, poll=0.05)
         if not hwnd:
             print("[WARN] 未检测到新 Explorer 窗口。")
-            # 失败时，同步做一次清理以避免残留
             cleanup_new_explorer_processes(before_pids, hwnd_hint=None)
             return
 
@@ -550,7 +855,6 @@ def right_click_and_find():
             path = cur.get(hwnd, "")
         print(f"[EXPLORER] hwnd={hwnd}, path={path}")
 
-        # 异步收尾：不阻塞主流程
         close_and_cleanup_explorer_async(before_pids, hwnd, close_timeout_sec=0.5, final_wait_sec=0.15)
 
         if not path or not os.path.exists(path):
@@ -566,21 +870,10 @@ def right_click_and_find():
 
     except Exception as e:
         print("[ERROR]", e)
-    finally:
-        # 兜底：如果还处于锁定，则释放，防止异常导致一直锁住
-        if 'mouse_lock_active' in globals() and mouse_lock_active:
-            try:
-                unlock_mouse()
-            except Exception:
-                pass
 
-# ---------- 仅在按住修饰键时装鼠标钩子 ----------
-import ctypes
-from ctypes import wintypes
-user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
-
+# ---------- 全局低层鼠标钩子 ----------
 WH_MOUSE_LL = 14
-WM_MOUSEMOVE = 0x0200  # 新增：用于拦截物理移动
+WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN, WM_LBUTTONUP = 0x0201, 0x0202
 WM_RBUTTONDOWN, WM_RBUTTONUP = 0x0204, 0x0205
 WM_MBUTTONDOWN, WM_MBUTTONUP = 0x0207, 0x0208
@@ -629,9 +922,6 @@ STOP_HOOK = threading.Event()
 hotkey_used_this_hold = False
 swallow_pair_active = False
 
-# 新增：物理鼠标移动锁标志
-mouse_lock_active = False
-
 def _mods_pressed_win():
     for m in TRIGGER_MODS:
         m = m.lower()
@@ -639,7 +929,7 @@ def _mods_pressed_win():
             if not (user32.GetAsyncKeyState(VK_LWIN) & 0x8000 or user32.GetAsyncKeyState(VK_RWIN) & 0x8000):
                 return False
         else:
-            vk = MOD2VK.get(m)
+            vk = MOD2VK.get(m, None)
             if vk is None:
                 return False
             if (user32.GetAsyncKeyState(vk) & 0x8000) == 0:
@@ -649,48 +939,31 @@ def _mods_pressed_win():
 def _button_pair_for_trigger():
     return BUTTON_WM.get(TRIGGER_BUTTON, BUTTON_WM["left"])
 
-def lock_mouse():
-    """开启物理鼠标移动锁，并确保钩子运行。"""
-    global mouse_lock_active
-    mouse_lock_active = True
-    _ensure_hook_started()
-
-def unlock_mouse():
-    """关闭物理鼠标移动锁；若未按修饰键则顺便卸钩。"""
-    global mouse_lock_active
-    mouse_lock_active = False
-    if not _mods_pressed_win():
-        _ensure_hook_stopped()
-
 @LowLevelMouseProc
 def _mouse_proc(nCode, wParam, lParam):
-    global hotkey_used_this_hold, swallow_pair_active, _last_trigger, mouse_lock_active
+    global hotkey_used_this_hold, swallow_pair_active, _last_trigger
+
     if nCode != 0:
         return user32.CallNextHookEx(HOOK_HANDLE, nCode, wParam, lParam)
 
     hs = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
 
-    # 忽略注入事件（避免我们模拟的移动/点击被钩子吞掉）
+    # 忽略注入事件（不吞我们自己发的点击/移动）
     if hs.flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED):
         return user32.CallNextHookEx(HOOK_HANDLE, nCode, wParam, lParam)
 
-    # 若处于锁定，吞掉物理鼠标移动（不影响程序注入的移动）
-    if mouse_lock_active and wParam == WM_MOUSEMOVE:
-        return 1
+    if not _mods_pressed_win():
+        hotkey_used_this_hold = False
+        swallow_pair_active = False
+        return user32.CallNextHookEx(HOOK_HANDLE, nCode, wParam, lParam)
 
     downs, ups = _button_pair_for_trigger()
 
-    # 正在吞这对按键：继续吞到对应的 up 为止
     if swallow_pair_active:
         if wParam == ups:
             swallow_pair_active = False
         return 1
 
-    # 只有修饰键按住时才判断/触发；否则立即放行
-    if not _mods_pressed_win():
-        return user32.CallNextHookEx(HOOK_HANDLE, nCode, wParam, lParam)
-
-    # 仅在本次按住期间第一次触发
     if (not hotkey_used_this_hold) and (wParam == downs):
         swallow_pair_active = True
         hotkey_used_this_hold = True
@@ -698,8 +971,13 @@ def _mouse_proc(nCode, wParam, lParam):
         with _trigger_lock:
             if now - _last_trigger >= DEBOUNCE_SEC:
                 _last_trigger = now
-                threading.Thread(target=right_click_and_find, daemon=True).start()
+                # **使用物理光标坐标作为触发点（比直接用 hs.pt 更可靠）**
+                mx, my = _get_cursor_pos_physical()
+                threading.Thread(target=right_click_and_find, args=((mx, my),), daemon=True).start()
         return 1
+
+    if wParam == ups:
+        hotkey_used_this_hold = False
 
     return user32.CallNextHookEx(HOOK_HANDLE, nCode, wParam, lParam)
 
@@ -709,9 +987,9 @@ def _hook_loop():
     hInstance = kernel32.GetModuleHandleW(None)
     HOOK_HANDLE = user32.SetWindowsHookExW(WH_MOUSE_LL, _mouse_proc, hInstance, 0)
     if not HOOK_HANDLE:
+        print("[ERROR] 安装低层鼠标钩子失败（尝试以管理员运行）。")
         return
     msg = wintypes.MSG()
-    # 阻塞式消息泵，降低 CPU 占用
     while not STOP_HOOK.is_set() and user32.GetMessageW(ctypes.byref(msg), 0, 0, 0) != 0:
         user32.TranslateMessage(ctypes.byref(msg))
         user32.DispatchMessageW(ctypes.byref(msg))
@@ -720,58 +998,25 @@ def _hook_loop():
         HOOK_HANDLE = None
     HOOK_THREAD_ID = None
 
-def _ensure_hook_started():
-    """按下修饰键时调用：若未装钩子则装，重置本次按住的状态。也可供锁定时强制启用钩子。"""
-    global HOOK_THREAD, hotkey_used_this_hold, swallow_pair_active
-    if HOOK_THREAD and HOOK_THREAD.is_alive():
-        return
-    hotkey_used_this_hold = False
-    swallow_pair_active = False
+def _start_mouse_hook_always_on():
+    global HOOK_THREAD
     STOP_HOOK.clear()
     HOOK_THREAD = threading.Thread(target=_hook_loop, daemon=True, name="LLMouseHook")
     HOOK_THREAD.start()
+    print("[STATE] 低层鼠标钩子已启用。")
 
-def _ensure_hook_stopped():
-    """松开任一修饰键时调用：卸钩子，彻底停止后台处理。"""
-    global hotkey_used_this_hold, swallow_pair_active
-    hotkey_used_this_hold = False
-    swallow_pair_active = False
+def _stop_mouse_hook():
     if HOOK_THREAD and HOOK_THREAD.is_alive():
         STOP_HOOK.set()
         if HOOK_THREAD_ID:
             user32.PostThreadMessageW(HOOK_THREAD_ID, WM_QUIT, 0, 0)
-
-def _norm_mod(m):
-    return "windows" if m.lower() == "win" else m.lower()
-
-def _is_trigger_mod(name: str) -> bool:
-    n = name.lower()
-    if "windows" in n or n in ("left windows", "right windows", "win", "left win", "right win"):
-        return "win" in TRIGGER_MODS or "windows" in TRIGGER_MODS
-    return any(n == _norm_mod(m) for m in TRIGGER_MODS)
-
-def _on_key_event(e):
-    try:
-        if not hasattr(e, "name") or e.name is None:
-            return
-        if not _is_trigger_mod(e.name):
-            return
-        if e.event_type == "down":
-            if all(keyboard.is_pressed(_norm_mod(m)) for m in TRIGGER_MODS):
-                _ensure_hook_started()
-        elif e.event_type == "up":
-            # 锁住期间不要卸钩；释放锁时会判断是否卸钩
-            if not mouse_lock_active:
-                _ensure_hook_stopped()
-    except Exception:
-        pass
+        print("[STATE] 低层鼠标钩子已卸载。")
 
 def main():
     print("启动成功：")
-    print(f"  - 触发：{' + '.join([*TRIGGER_MODS, TRIGGER_BUTTON])}（仅在按住修饰键时短暂启用鼠标钩子）")
+    print(f"  - 触发：{' + '.join([*TRIGGER_MODS, TRIGGER_BUTTON])}（只截“右下/右中”两块）")
     print(f"  - 退出：{EXIT_HOTKEY}")
-    if not os.path.exists(TEMPLATE_PATH):
-        print(f"[提示] 模板未找到：{TEMPLATE_PATH}")
+
     if PLAYER_MPV:
         print(f"[播放器] mpv：{PLAYER_MPV}")
     elif PLAYER_FFPLAY:
@@ -779,12 +1024,12 @@ def main():
     else:
         print("[播放器] 未找到 mpv/ffplay。")
 
-    keyboard.hook(_on_key_event)
+    _load_all_templates()
+    _start_mouse_hook_always_on()
     try:
         keyboard.wait(EXIT_HOTKEY)
     finally:
-        _ensure_hook_stopped()
-        keyboard.unhook(_on_key_event)
+        _stop_mouse_hook()
         print("[状态] 已退出。")
 
 if __name__ == "__main__":
