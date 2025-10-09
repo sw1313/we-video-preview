@@ -34,7 +34,7 @@ args = ["-autoexit", "-hide_banner", "-loglevel", "error"]
 # ========== 模板匹配 / 截屏 ==========
 [match]
 anchor_horizontal = "right"
-templates = ["ocr1.png", "ocr2.png"]
+template_globs = ["templates/*.png", "templates/**/*.png"]
 search_whole_screen = false
 search_box_w = 500
 search_box_h = 1400
